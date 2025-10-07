@@ -7,7 +7,6 @@ This repository implements a voxel‑wise Cox proportional hazards regression pi
 ## Features
 
 - Modular MATLAB functions with clear I/O and documentation  
-- Interactive file selection for clinical CSV  
 - Slice-wise processing to avoid memory overload  
 - Option to use `parfor` (Parallel Toolbox) or fallback to serial loops  
 - Supports interaction terms in Cox model  
