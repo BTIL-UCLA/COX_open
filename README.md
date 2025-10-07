@@ -192,9 +192,10 @@ Clinical CSV & FLAIR masks
 - Make sure your template NIfTI (`flairmask_sample.nii.gz`) matches the spatial dimensions and orientation of your data.
 - Make sure your template csv (`example_csvfile.csv`) matches the structure and header names of your data.
 - Use `use_parallel = 'yes'` only if Parallel Computing Toolbox is installed.
-- Remember the nomenclature convntion for the output files (see Interpretation of Outputs, above) 
+- Remember the nomenclature convention for the output files (see Interpretation of Outputs, above) 
 - For debugging, try on a subset of slices or voxels first.  
-- Inspect logs in the output folder to track progress or issues.  
+- Inspect logs in the output folder to track progress or issues.
+- You may silence the Warnings by typing `warning off;` in the command window, before running the main function
 
 ---
 
