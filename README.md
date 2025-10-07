@@ -25,6 +25,7 @@ This repository implements a voxel‑wise Cox proportional hazards regression pi
   ├── example_csvfile.csv          ← template csv file for clinical data  
   ├── flairmask_sample.nii.gz      ← template NIfTI for geometry
   ├── README.md
+  ├── LICENSE
   └── (other scripts, utils, sample data)
 ```
 
