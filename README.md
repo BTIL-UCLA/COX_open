@@ -15,15 +15,16 @@ This repository implements a voxel‑wise Cox proportional hazards regression pi
 
 ---
 
-## Repository Structure (suggested)
+## Repository Structure 
 
 ```
 / (root)
-  ├── main_cox_atlas.m
-  ├── load_clinical_data.m
-  ├── run_voxelwise_cox.m
-  ├── save_nifti_maps.m
-  ├── flairmask_sample.nii.gz     ← template NIfTI for geometry
+  ├── main_cox_atlas.m             ← main function
+  ├── load_clinical_data.m         ← function that loads clinical data from csv
+  ├── run_voxelwise_cox.m          ← function that runs the Cox model
+  ├── save_nifti_maps.m            ← function that saves the outputs as nifti files
+  ├── example_csvfile.csv          ← template csv file for clinical data  
+  ├── flairmask_sample.nii.gz      ← template NIfTI for geometry
   ├── README.md
   └── (other scripts, utils, sample data)
 ```
@@ -39,22 +40,39 @@ This repository implements a voxel‑wise Cox proportional hazards regression pi
 
 ---
 
+## Preparing the data (before running the code):
+- Tumor segmentations:
+	  - Curate individual patient binary tumor segmentations as NIfTI files, 
+	  - Register to the MNI space 1mm isotropic, 
+	  - Store all segmentations in a dedicated datafolder
+- Clinical information:
+	  - Collect patient clinical information (age, MGMT status, tumor volume, treatment arm, and survival) 
+	  - Store in a csv file 
+	  - Make sure to use the appropriate headers in the csv columns (see the example file)
+
+---
+
 ## Usage
 
 1. Open MATLAB in the project folder (so paths resolve).  
 2. Run the main function with parameters, for example:
 
    ```matlab
-   prefix = '/path/to/data/';
-   output_name = 'Experiment32_Output';
+   csv_path = '/path/to/csv_with_clinical_data.csv';
+   datafolder_name = '/path/to/folder_with_nifti_segmentations';
+   finalfolder_name = 'Experiment32_Output_Folder';
+   num_covariates = 6; or 5;
+   interaction_var = 'tx'; (or 'flair_vol');
    load_data = 'yes';
    delete_data = 'yes';
    use_parallel = 'yes';
 
-   main_cox_atlas(prefix, output_name, load_data, delete_data, use_parallel)
+   main_cox_atlas(csv_path, datafolder_name, finalfolder_name, num_covariates, interaction_var, load_data, delete_data, use_parallel)
    ```
 
-3. On startup, the code will prompt you to pick the clinical CSV file via a file dialog.  
+3. if load_data = 'yes', the code will ask for the segmentation_nifti naming convention (via the command window)
+    e.g. AVAglio-flairmask_%04d.nii.gz
+
 4. The pipeline proceeds:
    - Load clinical data  
    - (If enabled) Prepare slice `.mat` files  
@@ -64,16 +82,31 @@ This repository implements a voxel‑wise Cox proportional hazards regression pi
 
 ---
 
+## Interpretation of Outputs
+
+The code is structured so that, in case of Interaction Variables, it will flip the order of the covariates so that the interaction (Covariate6) is always between Covariate4 and Covariate5.
+     a) IF no interaction:                    Cov3 = flair_vol;   Cov4 = tx;          Cov5 = tumor presence 
+     b) IF interaction with Tx:               Cov3 = flair_vol;   Cov4 = tx;          Cov5 = tumor presence;     Cov6 = Interaction tx*tumor
+     c) IF interaction with flair_volume:     Cov3 = tx;          Cov4 = flair_vol;   Cov5 = tumor presence;     Cov6 = Interaction flair_volume*tumor
+
+Therefore, the output Beta_map for Covariate4 may refer to Beta_map_Tx (a and b) or Beta_map_TumorVolume (c), depending on which Interaction Variable was chosen. 
+The same nomenclature applies to p_value_maps and to variance_maps and covariance_maps.
+
+---
+
 ## Function Descriptions & I/O
 
-### `main_cox_atlas(prefix, finalfolder_name, load_data, delete_data, use_parallel)`
+### `main_cox_atlas(csvfile_name, datafolder_name, finalfolder_name, num_covariates, interaction_var, load_data, delete_data, use_parallel)`
 
 - **Inputs**  
-  - `prefix` : root path to imaging & script resources  
-  - `finalfolder_name` : name of output folder (created within prefix)  
-  - `load_data` : `'yes'` or `'no'`, whether to regenerate slice files  
-  - `delete_data` : `'yes'` or `'no'`, whether to remove existing slice files  
-  - `use_parallel` : `'yes'` or `'no'` to toggle `parfor` usage  
+  - `csvfile_name`     - (str) Path to csv file with the clinical data  (e.g. '/PatientData/SurvivalData.csv')
+  - `datafolder_name`  - (str) Path to the segmentation nifti files (e.g. '/PatientData/Segmentations')
+  - `finalfolder_name` - (str) Name for the output directory
+  - `num_covariates`   - (int) `5` or `6`: Age, MGMT, Volume, Tx, TumorPresence, Interaction
+  - `interaction_var`  - (str) if num_covariates ==6 then default intearction is 'tx', use 'flair_vol' to change; if num_covariates ==5 then this variable has no use
+  - `load_data`        - (str)`'yes'` or `'no'`, whether to regenerate slice files
+  - `delete_data`      - (str)`'yes'` or `'no'`, whether to delete old slice files
+  - `use_parallel`     - (str)`'yes'` or `'no'`, use MATLAB Parallel toolbox if available
 
 - **Outputs / Effects**  
   - Creates output folder and log file  
@@ -83,10 +116,10 @@ This repository implements a voxel‑wise Cox proportional hazards regression pi
 
 ### `load_clinical_data()`
 
-- Prompts user with file selection dialog to pick the clinical CSV  
 - Returns `patient_data` (matrix) and `num_pat`  
 - The CSV is expected to include columns such as:  
   `PatientID, SiteID, Age, Status, OS, Volume, Tx, MGMT`  
+  (see the template csv file)
 
 ---
 
@@ -133,7 +166,6 @@ This repository implements a voxel‑wise Cox proportional hazards regression pi
 
 ```text
 [User runs main_cox_atlas]
- → choose CSV via dialog
  → (optional) delete and create slice files
  → slice-by-slice Cox regression
  → per-slice `.mat` files saved
@@ -158,8 +190,10 @@ Clinical CSV & FLAIR masks
 
 ## Tips & Considerations
 
-- Make sure your template NIfTI (`flairmask_sample.nii.gz`) matches the spatial dimensions and orientation of your data.  
-- Use `use_parallel = 'yes'` only if Parallel Computing Toolbox is installed.  
+- Make sure your template NIfTI (`flairmask_sample.nii.gz`) matches the spatial dimensions and orientation of your data.
+- Make sure your template csv (`example_csvfile.csv`) matches the structure and header names of your data.
+- Use `use_parallel = 'yes'` only if Parallel Computing Toolbox is installed.
+- Remember the nomenclature convntion for the output files (see Interpretation of Outputs, above) 
 - For debugging, try on a subset of slices or voxels first.  
 - Inspect logs in the output folder to track progress or issues.  
 
@@ -167,4 +201,8 @@ Clinical CSV & FLAIR masks
 
 ## License & Citation
 
-Please include appropriate licensing (e.g. MIT, BSD) and cite this code if used in your publications.
+This project is licensed under the Apache License 2.0 — see the LICENSE file for details.
+
+Please cite this code if used in your publications, as well as the original article:
+    Sanvito F, Raymond C, Telesca D, Yao J, Abrey LE, Garcia J, Simmons B, Chinot O, Saran F, Nishikawa R, Henriksson R, Mason WP, Wick W, Cloughesy TF, Ellingson BM.
+    "Framework for statistical parametric mapping of impact of tumor location, treatment arm, prognostic variables, and survival using a randomized phase 3 trial of newly diagnosed glioblastoma" 
