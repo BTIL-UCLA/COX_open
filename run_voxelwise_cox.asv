@@ -1,0 +1,296 @@
+function [B, p_map, var_map] = run_voxelwise_cox(num_pat, patient_data, finalfolder_name, ...
+    threshold, max_x, max_y, max_z, num_covariates, use_parallel, interaction_var)
+% RUN_VOXELWISE_COX - Fit voxel-wise Cox regression and save per-slice results
+%
+%   This function performs voxel-wise Cox proportional hazards fits slice-by-slice
+%   and saves per-slice MAT files to disk (to avoid large memory usage).
+%
+%   INPUTS:
+%       num_pat         - (integer) Number of patients included after filtering
+%       patient_data    - (matrix) Patient-level clinical and imaging data
+%                         Columns expected: [PatientID, SiteID, Age, Status, OS, Volume, Tx, MGMT]
+%       finalfolder_name- (string) Path to folder where slice_###.mat and results will be stored
+%       threshold       - (integer) Minimum number of patients per voxel required
+%       max_x, max_y, max_z - (integers) Image dimensions
+%       num_covariates  - (integer) Number of covariates (typically 6)
+%       use_parallel    - (string) 'yes' or 'no' to use parfor
+%       interaction_var - (string ) default 'tx', use 'flair_vol' to change.
+%
+%   OUTPUTS:
+%       B       - (4D array) Beta coefficient maps [X,Y,Covariates,Z] OR []
+%                 If memory is unavailable, returns [] and per-slice files exist on disk.
+%       p_map   - (4D array) P-value maps [X,Y,Covariates,Z] OR []
+%       var_map - (4D array) Variance/covariance maps [X,Y,3,Z] OR []
+%
+%   SIDE EFFECTS:
+%       Creates (if not already present) the following folders under outdir:
+%         - b/                contains bslice_###.mat
+%         - p_map/            contains p_mapslice_###.mat
+%         - var_covar_cov4_and_cov6/ contains varslice_###.mat
+%
+%   NOTES:
+%       - This implements the slice-saving workflow because full 4D arrays
+%         often do not fit in memory for large volumes.
+%       - If you want to force in-memory outputs, allocate enough RAM before running.
+%
+%   Example:
+%       [B, p_map, var_map] = run_voxelwise_cox(patient_data, 'Experiment_Output', ...
+%           5, 182, 218, 182, 6, 'yes');
+
+    % ----- Prepare survival & covariate vectors ---------------------------
+    T = patient_data(1:num_pat,5);        % Survival time (days)
+    status = ~patient_data(1:num_pat,4);  % 1=event, 0=censored (matches your script)
+    age = patient_data(1:num_pat,3);
+    flair_vol = patient_data(1:num_pat,6);
+    tx = patient_data(1:num_pat,7);
+    MGMT = patient_data(1:num_pat,8);
+
+    % ----- Create result folders (if needed) -----------------------------
+    b_dir     = fullfile(finalfolder_name,'b');
+    pmap_dir  = fullfile(finalfolder_name,'p_map');    
+    if ~exist(b_dir,'dir'),     mkdir(b_dir);     end
+    if ~exist(pmap_dir,'dir'),  mkdir(pmap_dir);  end
+
+    if num_covariates == 6
+        var_dir   = fullfile(finalfolder_name,'var_covar_cov4_and_cov6');
+        if ~exist(var_dir,'dir'),   mkdir(var_dir);   end
+    end
+
+    % ----- Preallocate 4D arrays; if it fails, fall back to saving slices only
+    able_to_allocate = true;
+    try
+        B       = zeros(max_x, max_y, num_covariates, max_z);
+        p_map   = zeros(max_x, max_y, num_covariates, max_z);
+        if num_covariates == 6
+            var_map = zeros(max_x, max_y, 3, max_z);  % var_cov4, var_cov6, covar(4,6) % comment out if no Interaction
+        end
+    catch 
+        warning('Unable to preallocate 4D result arrays (likely memory)');
+        warning('Proceeding in disk-only mode. Function will return empty arrays for B/p_map/var_map.');
+        B = []; p_map = []; 
+        if num_covariates == 6
+            var_map = [];
+        end
+        able_to_allocate = false;
+    end
+
+    % ----- Parallel pool if requested -----------------------------------
+    if strcmpi(use_parallel,'yes')
+        pool = gcp('nocreate');
+        if isempty(pool)
+            try
+                parpool;
+            catch
+                warning('Could not start parallel pool: %s\nProceeding without parallel pool.');
+            end
+        end
+    end
+
+    % ----- Process slice-by-slice ---------------------------------------
+    for current_s = 1:max_z
+        fprintf('Processing slice %d / %d\n', current_s, max_z);
+
+        % 1. threshold Voxels
+        % Load slice .mat created earlier: expects var_data(:,:,patients)
+        slice_fname = fullfile(finalfolder_name, sprintf('slice_%03d.mat', current_s));
+        if ~exist(slice_fname,'file')
+            warning('Slice file not found: %s. Skipping slice %d.', slice_fname, current_s);
+            continue;
+        end
+        % load only var_data
+        s = load(slice_fname, 'var_data');
+        var_data = s.var_data; clear s;
+        % Restrict to patients actually present
+        var_data = var_data(:,:,1:num_pat);
+
+        % Sum across patients to find voxels with at least "threshold" patients present
+        sumtxscan = sum(var_data,3);
+        vox_thresh = (sumtxscan >= threshold);
+        vox_ID = find(vox_thresh);
+        num_vox_thresh = numel(vox_ID);
+        if num_vox_thresh == 0
+            fprintf('  No voxels passed threshold in slice %d. Continuing.\n', current_s);
+            % create and save empty slices so subsequent steps don't fail
+            singleslice_b = zeros(max_x, max_y, num_covariates);
+            singleslice_p_map = zeros(max_x, max_y, num_covariates);
+            
+            save(fullfile(b_dir, sprintf('bslice_%03d.mat', current_s)), 'singleslice_b', '-v7.3');
+            save(fullfile(pmap_dir, sprintf('p_mapslice_%03d.mat', current_s)), 'singleslice_p_map', '-v7.3');
+
+            if num_covariates == 6
+                singleslice_vars = zeros(max_x, max_y, 3);
+                save(fullfile(var_dir, sprintf('varslice_%03d.mat', current_s)), 'singleslice_vars', '-v7.3');
+            end
+            continue;
+        end
+
+        %2. allocate space for hazard ratio and p-value maps, survival curves
+        % Preallocate per-voxel temporary arrays (size = number of voxels passing threshold)
+        par_b_temp  = zeros(num_vox_thresh, num_covariates);
+        par_p_map_temp = zeros(num_vox_thresh, num_covariates);
+        if num_covariates == 6
+            par_var_covar_cov4_and_cov6 = zeros(num_vox_thresh, 3); % [var_cov4, var_cov6, cov_4_6]
+        end
+        coorx = zeros(num_vox_thresh,1);
+        coory = zeros(num_vox_thresh,1);
+
+        % Build tumor_array: patients x voxels
+        tumor_array = zeros(num_pat, num_vox_thresh);
+        for i = 1:num_vox_thresh
+            [coorx(i), coory(i)] = ind2sub([max_x, max_y], vox_ID(i));
+            tumor_array(:,i) = squeeze(var_data(coorx(i), coory(i), :));
+            if rem(i,3000) == 0
+                fprintf('   %d voxels loaded for this slice\n', i);
+            end
+        end
+
+        % Parfor loop over voxels passing threshold
+        for i = 1:num_vox_thresh
+            % Assemble covariates. Original script had multiple commented-out
+            % variants; here we use the Tx * TumorPresence interaction in slot 6.
+            Cov1 = age;
+            Cov2 = MGMT;
+            Cov3 = flair_vol;
+            Cov4 = tx;
+            if strcmp(interaction_var,'flair_vol')
+                Cov3 = tx;
+                Cov4 = flair_vol;
+            end
+            Cov5 = tumor_array(:,i);
+            covar = [Cov1, Cov2, Cov3, Cov4, Cov5];
+            if num_covariates == 6
+                Cov6 = Cov4 .* Cov5;  % interaction term
+                covar = [covar, Cov6];
+            end
+
+            [b, ~, ~, stats] = coxphfit(covar, T, 'censoring', status);
+            par_b_temp(i,:) = b(:)';
+            par_p_map_temp(i,:) = stats.p(:)';
+
+            if num_covariates == 6
+                % extract covariance matrix: Comment out if no interaction
+                % variance and covariance needed for combined p value
+                cov_matrix = stats.covb;          
+                var_cov4 = cov_matrix(4,4);
+                var_cov6 = cov_matrix(6,6);
+                cov_cov4_6 = cov_matrix(4,6);
+                par_var_covar_cov4_and_cov6(i,:) = [var_cov4, var_cov6, cov_cov4_6];
+            end
+
+            if rem(i,3000) == 0
+                fprintf('   %d voxels processed for this slice\n', i);
+            end
+        end % parfor
+
+        %b maps
+        singleslice_b_Cov3 = zeros([max_x max_y]); 
+        singleslice_b_Cov3(vox_ID) = par_b_temp(:,3);
+        singleslice_b_Cov4 = zeros([max_x max_y]); 
+        singleslice_b_Cov4(vox_ID) = par_b_temp(:,4); 
+        singleslice_b_Cov5 = zeros([max_x max_y]); 
+        singleslice_b_Cov5(vox_ID) = par_b_temp(:,5);
+
+        singleslice_b(:,:,3) = singleslice_b_Cov3;
+        singleslice_b(:,:,4) = singleslice_b_Cov4;
+	    singleslice_b(:,:,5) = singleslice_b_Cov5;     
+               
+        % p-value maps
+        singleslice_p_map_Cov3 = zeros([max_x max_y]); 
+        singleslice_p_map_Cov3(vox_ID) = par_p_map_temp(:,3);
+        singleslice_p_map_Cov4 = zeros([max_x max_y]); 
+        singleslice_p_map_Cov4(vox_ID) = par_p_map_temp(:,4);
+        singleslice_p_map_Cov5 = zeros([max_x max_y]); 
+        singleslice_p_map_Cov5(vox_ID) = par_p_map_temp(:,5);
+
+
+        singleslice_p_map(:,:,3) = singleslice_p_map_Cov3;
+        singleslice_p_map(:,:,4) = singleslice_p_map_Cov4;
+	    singleslice_p_map(:,:,5) = singleslice_p_map_Cov5;
+        
+        if num_covariates == 6
+            singleslice_b_Cov6 = zeros([max_x max_y]);
+            singleslice_b_Cov6(vox_ID) = par_b_temp(:,6);
+            singleslice_b(:,:,6) = singleslice_b_Cov6;
+            singleslice_p_map_Cov6 = zeros([max_x max_y]);
+            singleslice_p_map_Cov6(vox_ID) = par_p_map_temp(:,6);
+            singleslice_p_map(:,:,6) = singleslice_p_map_Cov6;
+
+            % var-covar maps, comment out if no Interaction
+            singleslice_var_cov4 = zeros([max_x max_y]);
+            singleslice_var_cov4(vox_ID) = par_var_covar_cov4_and_cov6(:,1);
+            singleslice_var_cov6 = zeros([max_x max_y]);
+            singleslice_var_cov6(vox_ID) = par_var_covar_cov4_and_cov6(:,2);
+            singleslice_covar_cov4_and_cov6 = zeros([max_x max_y]);
+            singleslice_covar_cov4_and_cov6(vox_ID) = par_var_covar_cov4_and_cov6(:,3);
+
+            singleslice_vars(:,:,1) = singleslice_var_cov4;
+            singleslice_vars(:,:,2) = singleslice_var_cov6;
+            singleslice_vars(:,:,3) = singleslice_covar_cov4_and_cov6;
+            
+            % Save the per-slice MAT files (v7.3 for large slices)
+            save(fullfile(var_dir, sprintf('varslice_%03d.mat', current_s)), 'singleslice_vars', '-v7.3');
+        end
+        
+        % Save the per-slice MAT files (v7.3 for large slices)
+        save(fullfile(b_dir, sprintf('bslice_%03d.mat', current_s)), 'singleslice_b', '-v7.3');
+        save(fullfile(pmap_dir, sprintf('p_mapslice_%03d.mat', current_s)), 'singleslice_p_map', '-v7.3');
+
+        % Optionally (if preallocation succeeded) copy per-slice results into output 4D arrays
+        if able_to_allocate
+                B(:,:,:,current_s) = singleslice_b;
+                p_map(:,:,:,current_s) = singleslice_p_map;
+                var_map(:,:,:,current_s) = singleslice_vars;
+        end
+
+        % Clean temporary large arrays to free memory
+        clear par_b_temp par_p_map_temp  tumor_array singleslice_b singleslice_p_map
+        if num_covariates == 6
+            clear par_varcov_temp singleslice_vars
+        end
+    end % for each slice
+
+    fprintf('run_voxelwise_cox: finished processing all slices.\n');
+end
+
+function loop_voxels(num_vox_thresh,interaction_var,)
+  % Parfor loop over voxels passing threshold
+        for i = 1:num_vox_thresh
+            % Assemble covariates. Original script had multiple commented-out
+            % variants; here we use the Tx * TumorPresence interaction in slot 6.
+            Cov1 = age;
+            Cov2 = MGMT;
+            Cov3 = flair_vol;
+            Cov4 = tx;
+            if strcmp(interaction_var,'flair_vol')
+                Cov3 = tx;
+                Cov4 = flair_vol;
+            end
+            Cov5 = tumor_array(:,i);
+            covar = [Cov1, Cov2, Cov3, Cov4, Cov5];
+            if num_covariates == 6
+                Cov6 = Cov4 .* Cov5;  % interaction term
+                covar = [covar, Cov6];
+            end
+
+            [b, ~, ~, stats] = coxphfit(covar, T, 'censoring', status);
+            par_b_temp(i,:) = b(:)';
+            par_p_map_temp(i,:) = stats.p(:)';
+
+            if num_covariates == 6
+                % extract covariance matrix: Comment out if no interaction
+                % variance and covariance needed for combined p value
+                cov_matrix = stats.covb;          
+                var_cov4 = cov_matrix(4,4);
+                var_cov6 = cov_matrix(6,6);
+                cov_cov4_6 = cov_matrix(4,6);
+                par_var_covar_cov4_and_cov6(i,:) = [var_cov4, var_cov6, cov_cov4_6];
+            end
+
+            if rem(i,3000) == 0
+                fprintf('   %d voxels processed for this slice\n', i);
+            end
+        end % parfor
+
+
+
+end
